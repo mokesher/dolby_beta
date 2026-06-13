@@ -1,21 +1,31 @@
+/**
+ * 根项目构建配置
+ * AGP从4.0.2升级到8.10.0，以兼容Gradle 8.11.1和Java 21
+ * 仓库配置：移除已废弃的jcenter，使用mavenCentral和google
+ */
 buildscript {
     repositories {
-        maven { url "https://maven.aliyun.com/nexus/content/repositories/jcenter/" }
-        mavenCentral()
-        jcenter()
+        // 优先使用阿里云镜像，加速依赖下载
+        maven { url "https://maven.aliyun.com/repository/central" }
+        maven { url "https://maven.aliyun.com/repository/google" }
+        maven { url "https://maven.aliyun.com/repository/gradle-plugin" }
         google()
+        mavenCentral()
     }
     dependencies {
-        classpath "com.android.tools.build:gradle:4.0.2"
+        // AGP升级到8.10.0，兼容Gradle 8.11.1和Java 21
+        classpath "com.android.tools.build:gradle:8.10.0"
     }
 }
 
 allprojects {
     repositories {
-        maven { url "https://maven.aliyun.com/nexus/content/repositories/jcenter/" }
-        mavenCentral()
-        jcenter()
+        // 优先使用阿里云镜像，加速依赖下载
+        maven { url "https://maven.aliyun.com/repository/central" }
+        maven { url "https://maven.aliyun.com/repository/google" }
+        maven { url "https://maven.aliyun.com/repository/gradle-plugin" }
         google()
+        mavenCentral()
         flatDir {
             dirs 'libs'
         }

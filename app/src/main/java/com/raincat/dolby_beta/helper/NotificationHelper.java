@@ -59,7 +59,10 @@ public class NotificationHelper {
         drawable.draw(canvas);
         Icon icon = Icon.createWithBitmap(bitmap);
         builder.setSmallIcon(icon)
-                .setContentIntent(PendingIntent.getActivity(context, 0, new Intent(), 0))
+                // Android 12+（API 31）要求PendingIntent必须指定FLAG_IMMUTABLE或FLAG_MUTABLE
+                // 此处通知的PendingIntent不需要修改内容，使用FLAG_IMMUTABLE
+                .setContentIntent(PendingIntent.getActivity(context, 0, new Intent(),
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0))
                 .setContentTitle(title)
                 .setTicker(ticker)
                 .setAutoCancel(true)

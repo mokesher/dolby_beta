@@ -7,6 +7,7 @@ import com.raincat.dolby_beta.model.NeteaseSongListBean;
 import com.raincat.dolby_beta.net.Http;
 import com.raincat.dolby_beta.utils.NeteaseAES2;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
@@ -29,27 +30,47 @@ public class EAPIHelper {
 
     /**
      * 解除下载加密
+     * 修改fee/flag/payed等字段使歌曲显示为免费可播放，
+     * 同时保留URL中的查询参数（如vuutv签名）和所有其他原始字段。
+     *
+     * 重要：使用JSONObject直接修改字段，而不是Gson反序列化再序列化。
+     * 原因：NeteaseSongListBean.DataBean不包含响应中的所有字段
+     * （如freeTrialPrivilege、closedGain、sr、musicId等），
+     * Gson序列化会丢失这些字段，导致应用无法正常播放音乐。
      */
     public static String modifyPlayer(String original) {
-        NeteaseSongListBean listBean = gson.fromJson(original, NeteaseSongListBean.class);
-
-        NeteaseSongListBean modifyListBean = new NeteaseSongListBean();
-        modifyListBean.setCode(200);
-        modifyListBean.setData(new ArrayList<>());
-        for (NeteaseSongListBean.DataBean dataBean : listBean.getData()) {
-            //flag与8非0为云盘歌曲
-            if ((dataBean.getFlag() & 0x8) == 0) {
-
-                dataBean.setFee(0);
-                dataBean.setFlag(0);
-                dataBean.setPayed(0);
-                dataBean.setFreeTrialInfo(null);
-                if (dataBean.getUrl() != null && dataBean.getUrl().contains("?"))
-                    dataBean.setUrl(dataBean.getUrl().substring(0, dataBean.getUrl().indexOf("?")));
+        try {
+            JSONObject jsonObject = new JSONObject(original);
+            JSONArray dataArray = jsonObject.getJSONArray("data");
+            for (int i = 0; i < dataArray.length(); i++) {
+                JSONObject dataObj = dataArray.getJSONObject(i);
+                // flag与8非0为云盘歌曲，云盘歌曲不修改
+                int flag = dataObj.optInt("flag", 0);
+                if ((flag & 0x8) == 0) {
+                    dataObj.put("fee", 0);
+                    dataObj.put("flag", 0);
+                    dataObj.put("payed", 0);
+                    dataObj.remove("freeTrialInfo");
+                }
             }
-            modifyListBean.getData().add(dataBean);
+            return jsonObject.toString();
+        } catch (Exception e) {
+            // JSONObject解析失败时回退到Gson方式
+            NeteaseSongListBean listBean = gson.fromJson(original, NeteaseSongListBean.class);
+            NeteaseSongListBean modifyListBean = new NeteaseSongListBean();
+            modifyListBean.setCode(200);
+            modifyListBean.setData(new ArrayList<>());
+            for (NeteaseSongListBean.DataBean dataBean : listBean.getData()) {
+                if ((dataBean.getFlag() & 0x8) == 0) {
+                    dataBean.setFee(0);
+                    dataBean.setFlag(0);
+                    dataBean.setPayed(0);
+                    dataBean.setFreeTrialInfo(null);
+                }
+                modifyListBean.getData().add(dataBean);
+            }
+            return gson.toJson(modifyListBean);
         }
-        return gson.toJson(modifyListBean);
     }
 
     /**

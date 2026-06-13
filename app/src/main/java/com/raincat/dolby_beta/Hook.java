@@ -67,7 +67,25 @@ public class Hook {
     public static final String msg_send_notification = "sendNotification";
 
     public Hook(XC_LoadPackage.LoadPackageParam lpparam) {
-        XposedHelpers.findAndHookMethod(XposedHelpers.findClass("com.netease.cloudmusic.NeteaseMusicApplication", lpparam.classLoader),
+        Class<?> appClass = XposedHelpers.findClass("com.netease.cloudmusic.NeteaseMusicApplication", lpparam.classLoader);
+
+        // hook NeteaseMusicApplication.onCreate，在Application完全初始化后创建SettingHook
+        // SettingHook需要注册ActivityLifecycleCallbacks，这要求Application已完全初始化
+        // attachBaseContext阶段Application尚未完全初始化，注册回调可能无效
+        XposedHelpers.findAndHookMethod(appClass, "onCreate", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                final Context context = (Context) param.thisObject;
+                final int versionCode = context.getPackageManager().getPackageInfo(PACKAGE_NAME, 0).versionCode;
+                final String processName = Tools.getCurrentProcessName(context);
+                if (processName.equals(PACKAGE_NAME)) {
+                    //设置 - 在Application.onCreate完成后注册LifecycleCallbacks
+                    new SettingHook(context, versionCode);
+                }
+            }
+        });
+
+        XposedHelpers.findAndHookMethod(appClass,
                 "attachBaseContext", Context.class, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
@@ -80,8 +98,6 @@ public class Hook {
 
                         final String processName = Tools.getCurrentProcessName(context);
                         if (processName.equals(PACKAGE_NAME)) {
-                            //设置
-                            new SettingHook(context, versionCode);
                             //总开关
                             if (!SettingHelper.getInstance().getSetting(SettingHelper.master_key))
                                 return;

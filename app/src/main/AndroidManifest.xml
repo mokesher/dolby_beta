@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- AGP 8.x中package属性已移至build.gradle的namespace，此处不再声明 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
-    package="com.raincat.dolby_beta">
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application
         android:allowBackup="false"
-        android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:multiArch="true"

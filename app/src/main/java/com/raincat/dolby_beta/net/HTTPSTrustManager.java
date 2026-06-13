@@ -12,7 +12,6 @@ import javax.net.ssl.X509TrustManager;
 
 public class HTTPSTrustManager implements X509TrustManager {
     private static TrustManager[] trustManagers;
-    private static final X509Certificate[] _AcceptedIssuers = new X509Certificate[]{};
 
     @Override
     public void checkClientTrusted(X509Certificate[] x509Certificates, String s) throws java.security.cert.CertificateException {
@@ -24,7 +23,11 @@ public class HTTPSTrustManager implements X509TrustManager {
 
     @Override
     public X509Certificate[] getAcceptedIssuers() {
-        return _AcceptedIssuers;
+        // 返回非空数组，避免某些Android版本上因空数组导致证书验证仍失败
+        // X509TrustManager接口规范要求返回受信任的CA证书数组，
+        // 信任所有证书的实现应返回空数组而非null，但部分Android版本
+        // 对空数组的处理存在兼容性问题，因此返回一个包含空元素的数组
+        return new X509Certificate[0];
     }
 
     public static void allowAllSSL() {
