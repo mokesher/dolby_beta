@@ -1,14 +1,21 @@
+# Android CI 工作流
+# 功能：自动构建 Release APK 并上传为构建产物
+# 触发条件：推送到 dev 分支、目标为 dev 的 PR、手动触发
+# 前置依赖：需在 GitHub Secrets 中配置签名相关的密钥（见 Prepare signing config 步骤说明）
+# 技术栈：AGP 8.10.0 + Gradle 8.11.1 + JDK 21
+
 name: Android CI
 
 on:
+  # 推送到 dev 分支时触发
   push:
     branches:
-      - master
+      - dev
+  # 目标为 dev 的 PR 时触发
   pull_request:
     branches:
-      - master
-    paths:
-      - '.github/workflows/*.yml'
+      - dev
+  # 支持在 GitHub Actions 页面手动触发
   workflow_dispatch:
 
 jobs:
@@ -17,28 +24,56 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 检出项目源码
       - name: Checkout source code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: set up JDK 1.8
-        uses: actions/setup-java@v1
+      # 配置 JDK 21，AGP 8.10.0 + Gradle 8.11.1 要求最低 JDK 17，项目使用 JDK 21
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
         with:
-          java-version: 1.8
+          java-version: '21'
+          distribution: 'temurin'
 
+      # 从远程仓库拉取 UnblockNeteaseMusic 服务端代码，打包为 zip 放入 assets 目录
+      # 流程：克隆 → 压缩为 zip → 删除旧资源 → 移动新 zip 到 assets 目录
       - name: Sync latest Unblocked Music source code
-        run:
-          git clone --depth=1 https://github.com/luoxingran/server.git && cd server && zip -r ../UnblockNeteaseMusic.zip . && cd .. && rm ./app/src/main/assets/UnblockNeteaseMusic.zip && rm -rf server && mv ./UnblockNeteaseMusic.zip ./app/src/main/assets/UnblockNeteaseMusic.zip
+        run: |
+          git clone --depth=1 https://github.com/Zruiry/server.git && cd server && zip -r ../UnblockNeteaseMusic.zip . && cd .. && rm -rf ./app/src/main/assets/UnblockNeteaseMusic.zip && rm -rf server && mv ./UnblockNeteaseMusic.zip ./app/src/main/assets/UnblockNeteaseMusic.zip
 
+      # 赋予 gradlew 可执行权限（Linux 环境必需）
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      # 方式一：签名文件已提交到仓库，checkout 后可直接使用（已禁用，切换时注释掉方式二即可）
+      # # 签名文件（lin.jks 和 signing.properties）已提交到仓库，checkout 后可直接使用
+
+      # 方式二：通过 GitHub Secrets 注入签名文件（当前启用）
+      # 需配置以下 Secrets：
+      #   KEYSTORE_BASE64    - 签名密钥库文件（Zruiry.jks）的 base64 编码内容
+      #   KEYSTORE_PASSWORD  - 密钥库密码
+      #   KEY_ALIAS          - 密钥别名
+      #   KEY_PASSWORD       - 密钥密码
+      # 生成 KEYSTORE_BASE64 的命令：base64 -w 0 app/Zruiry.jks
+      - name: Prepare signing config
+        run: |
+          # 创建签名配置文件
+          echo "KEYSTORE_FILE = ./Zruiry.jks" >> app/signing.properties
+          echo "KEYSTORE_PASSWORD = ${{ secrets.KEYSTORE_PASSWORD }}" >> app/signing.properties
+          echo "KEY_ALIAS = ${{ secrets.KEY_ALIAS }}" >> app/signing.properties
+          echo "KEY_PASSWORD = ${{ secrets.KEY_PASSWORD }}" >> app/signing.properties
+          # 从 Secrets 解码写入签名密钥库文件
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/Zruiry.jks
+
+      # 执行 Gradle 构建 Release APK
       - name: Build with Gradle
         run: ./gradlew app:assembleRelease
 
+      # 将构建产物上传为 Artifact，可在 Actions 页面下载
       - name: Upload APK
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: app-release
-          path: ${{github.workspace}}/app/build/outputs/apk/release/*.apk
+          path: ${{ github.workspace }}/app/build/outputs/apk/release/*.apk
           if-no-files-found: warn
           retention-days: 30
