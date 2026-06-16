@@ -1,20 +1,16 @@
 package com.raincat.dolby_beta.helper;
 
 import android.content.Context;
-import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.util.Log;
 
-
 import com.annimon.stream.Stream;
 
-import com.raincat.dolby_beta.utils.Tools;
 import org.jf.dexlib2.DexFileFactory;
 import org.jf.dexlib2.dexbacked.DexBackedClassDef;
 import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.jf.dexlib2.iface.MultiDexContainer;
-import org.json.JSONObject;
 
 import java.io.Closeable;
 import java.io.File;
@@ -38,7 +34,6 @@ import java.util.zip.ZipFile;
 
 import de.robv.android.xposed.XposedHelpers;
 
-import static de.robv.android.xposed.XposedHelpers.findClass;
 import static de.robv.android.xposed.XposedHelpers.findClassIfExists;
 import static de.robv.android.xposed.XposedHelpers.findMethodsByExactParameters;
 
@@ -47,20 +42,22 @@ import static de.robv.android.xposed.XposedHelpers.findMethodsByExactParameters;
  *     author : RainCat
  *     e-mail : nining377@gmail.com
  *     time   : 2021/04/14
- *     desc   : 类加载帮助
- *     version: 1.0
+ *     desc   : 类加载帮助 - 仅保留音源代理所需的内部类
+ *              保留：Cookie, OKHttp3Response, OKHttp3Header, HttpResponse, HttpUrl, HttpParams, HttpInterceptor
+ *              删除：DownloadTransfer, MainActivitySuperClass, BottomTabView, SidebarItem, CommentDataClass, Ad
+ *     version: 2.0
  * </pre>
  */
 
 public class ClassHelper {
     private static final String TAG = "dolby_beta";
-    //类加载器
+    // 类加载器
     private static ClassLoader classLoader = null;
-    //dex缓存
+    // dex缓存
     private static List<String> classCacheList = null;
-    //dex缓存路径
+    // dex缓存路径
     private static String classCachePath = null;
-    //网易云版本
+    // 网易云版本
     private static int versionCode = 0;
 
     public static synchronized void getCacheClassList(final Context context, final int version, final OnCacheClassListener listener) {
@@ -86,7 +83,6 @@ public class ClassHelper {
 
     private static synchronized void getCacheClassByZip(Context context, int version, OnCacheClassListener listener) {
         try {
-            // 不用 ZipDexContainer 因为会验证zip里面的文件是不是dex，会慢一点
             File appInstallFile = new File(context.getPackageResourcePath());
             Enumeration<? extends ZipEntry> zip = new ZipFile(appInstallFile).entries();
             while (zip.hasMoreElements()) {
@@ -130,6 +126,9 @@ public class ClassHelper {
         return clazz;
     }
 
+    /**
+     * Cookie获取 - 代理请求时需要携带Cookie
+     */
     public static class Cookie {
         private static Class<?> clazz, abstractClazz;
 
@@ -142,7 +141,6 @@ public class ClassHelper {
                     pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]+\\.[a-z]+\\.[a-z]+$");
                 else
                     pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.cookie\\.store\\.[a-zA-Z0-9]{1,25}$");
-
 
                 List<String> list = getFilteredClasses(pattern, null);
 
@@ -157,7 +155,7 @@ public class ClassHelper {
                             .findFirst()
                             .get();
 
-                  if (versionCode >= 154) {
+                    if (versionCode >= 154) {
                         clazz = Stream.of(list)
                                 .map(ClassHelper::getClassByXposed)
                                 .filter(c -> Modifier.isPublic(c.getModifiers()))
@@ -169,17 +167,15 @@ public class ClassHelper {
                         clazz = abstractClazz;
                     }
                 } catch (NoSuchElementException e) {
-                    MessageHelper.sendNotification(context, MessageHelper.cookieClassNotFoundCode);
                     Log.e(TAG, "ClassHelper: 找不到Cookie核心类");
                 }
             }
 
             Object cookieString = null;
-          if (versionCode >= 154) {
-                //获取静态cookie方法
+            if (versionCode >= 154) {
                 Method cookieMethod = XposedHelpers.findMethodsByExactParameters(clazz, clazz)[0];
                 Object cookie = XposedHelpers.callStaticMethod(clazz, cookieMethod.getName());
-              for (Method method : XposedHelpers.findMethodsByExactParameters(abstractClazz, String.class)) {
+                for (Method method : XposedHelpers.findMethodsByExactParameters(abstractClazz, String.class)) {
                     if (method.getTypeParameters().length == 0 && method.getModifiers() == Modifier.PUBLIC) {
                         cookieString = XposedHelpers.callMethod(cookie, method.getName());
                     }
@@ -193,283 +189,9 @@ public class ClassHelper {
         }
     }
 
-    public static class DownloadTransfer {
-        private static Method checkMd5Method;
-        private static Method checkDownloadStatusMethod;
-
-        //下载完后的MD5检查
-        public static Method getCheckMd5Method(Context context) {
-            if (checkMd5Method == null) {
-                Pattern pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.module\\.transfer\\.download\\.[a-z0-9]{1,2}$");
-                List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
-
-                try {
-                    checkMd5Method = Stream.of(list)
-                            .map(c -> getClassByXposed(c).getDeclaredMethods())
-                            .flatMap(Stream::of)
-                            .filter(m -> m.getParameterTypes().length == 4)
-                            .filter(m -> m.getParameterTypes()[0] == File.class)
-                            .filter(m -> m.getParameterTypes()[1] == File.class)
-                            .findFirst()
-                            .get();
-                } catch (NoSuchElementException e) {
-                    MessageHelper.sendNotification(context, MessageHelper.transferClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到Transfer核心类");
-                }
-            }
-            return checkMd5Method;
-        }
-
-        //下载之前下载状态检查
-        public static Method getCheckDownloadStatusMethod(Context context) {
-            if (checkDownloadStatusMethod == null) {
-                Pattern pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.module\\.transfer\\.download\\.[a-z0-9]{1,2}$");
-                List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
-
-                try {
-                    checkDownloadStatusMethod = Stream.of(list)
-                            .map(c -> getClassByXposed(c).getDeclaredMethods())
-                            .flatMap(Stream::of)
-                            .filter(m -> m.getReturnType() == long.class)
-                            .filter(m -> m.getParameterTypes().length == 5)
-                            .filter(m -> m.getParameterTypes()[1] == int.class)
-                            .filter(m -> m.getParameterTypes()[3] == File.class)
-                            .filter(m -> m.getParameterTypes()[4] == long.class)
-                            .findFirst()
-                            .get();
-                } catch (NoSuchElementException e) {
-                    MessageHelper.sendNotification(context, MessageHelper.transferClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到Transfer核心类");
-                }
-            }
-            return checkDownloadStatusMethod;
-        }
-    }
-
-    public static class MainActivitySuperClass {
-        private static Class<?> clazz;
-        private static List<Method> methods;
-        private static Method method;
-
-        static void getClazz(Context context) {
-            if (clazz == null) {
-                Class<?> mainActivityClass = findClass("com.netease.cloudmusic.activity.MainActivity", context.getClassLoader());
-                clazz = mainActivityClass.getSuperclass();
-            }
-        }
-
-        public static List<Method> getTabItemStringMethods(Context context) {
-            if (clazz == null)
-                getClazz(context);
-            if (methods == null && clazz != null) {
-                List<Method> methodList = Arrays.asList(clazz.getDeclaredMethods());
-                methods = Stream.of(methodList)
-                        .filter(m -> m.getParameterTypes().length >= 1)
-                        .filter(m -> m.getReturnType() == void.class)
-                        .filter(m -> m.getParameterTypes()[0] == String[].class)
-                        .filter(m -> Modifier.isPublic(m.getModifiers()))
-                        .toList();
-            }
-            return methods;
-        }
-
-        public static Method getViewPagerInitMethod(Context context) {
-            if (method == null) {
-                try {
-                    List<Method> methodList = Arrays.asList(findClass("com.netease.cloudmusic.activity.MainActivity", context.getClassLoader()).getDeclaredMethods());
-                    method = Stream.of(methodList)
-                            .filter(m -> m.getParameterTypes().length == 1)
-                            .filter(m -> m.getReturnType() == void.class)
-                            .filter(m -> m.getParameterTypes()[0] == Intent.class)
-                            .filter(m -> Modifier.isPrivate(m.getModifiers()))
-                            .findFirst()
-                            .get();
-                } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.tabClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到Tab核心类");
-                }
-            }
-            return method;
-        }
-    }
-
-    public static class BottomTabView {
-        private static Class<?> clazz;
-        private static Method initMethod, refreshMethod;
-
-        public static Class<?> getClazz(Context context) {
-            if (clazz == null) {
-                try {
-                    Pattern pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.module\\.[a-z0-9]{1,2}\\.[a-z]$");
-                    Pattern pattern2 = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z0-9]{1,2}\\.[a-z]\\.[a-z]$");
-                    Pattern pattern3 = Pattern.compile("^com\\.netease\\.cloudmusic\\.module\\.main\\.[a-z]$");
-                    List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
-                    list.addAll(ClassHelper.getFilteredClasses(pattern2, Collections.reverseOrder()));
-                    list.addAll(ClassHelper.getFilteredClasses(pattern3, Collections.reverseOrder()));
-                    clazz = Stream.of(list)
-                            .map(ClassHelper::getClassByXposed)
-                            .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            .filter(m -> Modifier.isFinal(m.getModifiers()))
-                            .filter(m -> !Modifier.isInterface(m.getModifiers()))
-                            .filter(m -> !Modifier.isStatic(m.getModifiers()))
-                            .filter(m -> !Modifier.isAbstract(m.getModifiers()))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == String.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == ArrayList.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == boolean.class))
-                            .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType() == ArrayList.class && Modifier.isFinal(m.getModifiers()) && m.getParameterTypes().length == 0))
-                            .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType() == String[].class && Modifier.isFinal(m.getModifiers()) && m.getParameterTypes().length == 0))
-                            .findFirst()
-                            .get();
-                } catch (NoSuchElementException e) {
-                    MessageHelper.sendNotification(context, MessageHelper.tabClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到Tab核心类");
-                }
-            }
-            return clazz;
-        }
-
-        public static Method getTabInitMethod(Context context) {
-            if (initMethod == null) {
-                Method[] methods = findMethodsByExactParameters(clazz, ArrayList.class);
-                if (methods.length != 0)
-                    initMethod = methods[0];
-                else
-                    MessageHelper.sendNotification(context, MessageHelper.tabClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到Tab核心类");
-            }
-            return initMethod;
-        }
-
-        public static Method getTabRefreshMethod(Context context) {
-            if (refreshMethod == null) {
-                Method[] methods = findMethodsByExactParameters(clazz, void.class, List.class);
-                if (methods.length != 0)
-                    refreshMethod = methods[0];
-                else
-                    MessageHelper.sendNotification(context, MessageHelper.tabClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到Tab核心类");
-            }
-            return refreshMethod;
-        }
-    }
-
-    public static class SidebarItem {
-        private static Class<?> clazz;
-
-        public static Class<?> getClazz(Context context) {
-            if (clazz == null) {
-                try {
-                    Pattern pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.module\\.account\\.[a-z]$");
-                    Pattern pattern2 = Pattern.compile("^com\\.netease\\.cloudmusic\\.music\\.biz\\.sidebar\\.account\\.[a-z0-9]{1,2}$");
-                    List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
-                    list.addAll(ClassHelper.getFilteredClasses(pattern2, Collections.reverseOrder()));
-                    clazz = Stream.of(list)
-                            .map(ClassHelper::getClassByXposed)
-                            .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            .filter(m -> Modifier.isFinal(m.getModifiers()))
-                            .filter(m -> !Modifier.isInterface(m.getModifiers()))
-                            .filter(m -> !Modifier.isStatic(m.getModifiers()))
-                            .filter(m -> !Modifier.isAbstract(m.getModifiers()))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == int.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == List.class))
-                            .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType() == List.class))
-                            .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType() == Throwable.class))
-                            .findFirst()
-                            .get();
-                } catch (NoSuchElementException e) {
-                    MessageHelper.sendNotification(context, MessageHelper.sidebarClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到Sidebar核心类");
-                }
-            }
-            return clazz;
-        }
-    }
-
     /**
-     * 评论
+     * OkHttp3 Response封装 - EAPIHook旧版方式需要
      */
-    public static class CommentDataClass {
-        private static Class<?> clazz;
-
-        public static Class<?> getClazz() {
-            if (clazz == null) {
-                try {
-                    Pattern pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.module\\.comment2\\.[a-z]\\.[a-z]$");
-                    Pattern pattern2 = Pattern.compile("^com\\.netease\\.cloudmusic\\.music\\.biz\\.comment\\.[a-z]\\.[a-z]$");
-                    Pattern pattern3 = Pattern.compile("^com\\.netease\\.cloudmusic\\.music\\.biz\\.comment\\.viewmodel\\.[a-z]$");
-                    List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
-                    list.addAll(ClassHelper.getFilteredClasses(pattern2, Collections.reverseOrder()));
-                    list.addAll(ClassHelper.getFilteredClasses(pattern3, Collections.reverseOrder()));
-                    clazz = Stream.of(list)
-                            .map(ClassHelper::getClassByXposed)
-                            .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            .filter(m -> !Modifier.isInterface(m.getModifiers()))
-                            .filter(m -> !Modifier.isStatic(m.getModifiers()))
-                            .filter(m -> !Modifier.isAbstract(m.getModifiers()))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == int.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == List.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == Intent.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == String.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == long.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == boolean.class))
-                            .findFirst()
-                            .get();
-                } catch (NoSuchElementException e) {
-                    e.printStackTrace();
-                }
-            }
-            return clazz;
-        }
-    }
-
-    /**
-     * 广告
-     */
-    public static class Ad {
-        private static Class<?> adClazz;
-        private static Class<?> clazz;
-
-        public static Class<?> getClazz() {
-            if (clazz == null) {
-                adClazz = getClassByXposed("com.netease.cloudmusic.meta.Ad");
-                try {
-                    Pattern pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.module\\.ad\\.[a-z]$");
-                    List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
-                    clazz = Stream.of(list)
-                            .map(ClassHelper::getClassByXposed)
-                            .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            .filter(m -> !Modifier.isInterface(m.getModifiers()))
-                            .filter(m -> !Modifier.isStatic(m.getModifiers()))
-                            .filter(m -> !Modifier.isAbstract(m.getModifiers()))
-                            .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType().getName().contains("VideoAdInfo")))
-                            .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType() == adClazz))
-                            .findFirst()
-                            .get();
-                } catch (NoSuchElementException e) {
-                    e.printStackTrace();
-                }
-            }
-            return clazz;
-        }
-
-        public static List<Method> getAdMethod() {
-            try {
-                List<Method> methodList = Arrays.asList(getClazz().getDeclaredMethods());
-                List<Method> hookMethodList = Stream.of(methodList)
-                        .filter(m -> m.getReturnType().getName().contains("com.netease.cloudmusic.meta"))
-                        .filter(m -> Stream.of(m.getParameterTypes()).anyMatch(c -> c == JSONObject.class))
-                        .toList();
-                hookMethodList.addAll(Stream.of(methodList)
-                        .filter(m -> Stream.of(m.getParameterTypes()).anyMatch(c -> c.getName().contains("com.netease.cloudmusic.meta")))
-                        .filter(m -> Stream.of(m.getParameterTypes()).anyMatch(c -> c == JSONObject.class))
-                        .toList());
-                return hookMethodList;
-            } catch (Exception e) {
-                return null;
-            }
-        }
-    }
-
     public static class OKHttp3Response {
         private static Class<?> clazz;
 
@@ -497,8 +219,7 @@ public class ClassHelper {
                             .findFirst()
                             .get();
                 } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到核心类，这将导致音源代理功能失效");
+                    Log.e(TAG, "ClassHelper: 找不到OKHttp3Response核心类，音源代理功能可能失效");
                 }
             }
             return clazz;
@@ -516,6 +237,9 @@ public class ClassHelper {
         }
     }
 
+    /**
+     * OkHttp3 Header封装 - EAPIHook旧版方式需要
+     */
     public static class OKHttp3Header {
         private static Class<?> clazz;
 
@@ -539,8 +263,7 @@ public class ClassHelper {
                             .findFirst()
                             .get();
                 } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到核心类，这将导致音源代理功能失效");
+                    Log.e(TAG, "ClassHelper: 找不到OKHttp3Header核心类，音源代理功能可能失效");
                 }
             }
             return clazz;
@@ -558,7 +281,7 @@ public class ClassHelper {
     }
 
     /**
-     * 获取请求返回
+     * 获取请求返回 - EAPIHook旧版方式需要
      */
     public static class HttpResponse {
         private static Class<?> clazz;
@@ -584,14 +307,12 @@ public class ClassHelper {
                             .map(ClassHelper::getClassByXposed)
                             .filter(c -> !Modifier.isAbstract(c.getModifiers()))
                             .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            // 新版网易云中类可能不再标记为final，移除final限制
                             .filter(c -> c.getSuperclass() == Object.class)
                             .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == OKHttp3Response.getClazz(context)))
                             .findFirst()
                             .get();
                 } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到核心类，这将导致音源代理功能失效");
+                    Log.e(TAG, "ClassHelper: 找不到HttpResponse核心类，音源代理功能可能失效");
                 }
             }
             return clazz;
@@ -629,8 +350,7 @@ public class ClassHelper {
                             .findFirst()
                             .get();
                 } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到核心类，这将导致音源代理功能失效");
+                    Log.e(TAG, "ClassHelper: 找不到getResultMethod，音源代理功能可能失效");
                 }
             }
             return getResultMethod;
@@ -638,7 +358,7 @@ public class ClassHelper {
     }
 
     /**
-     * 获取请求URL
+     * 获取请求URL - EAPIHook旧版方式需要
      */
     public static class HttpUrl {
         private static Class<?> clazz;
@@ -662,8 +382,7 @@ public class ClassHelper {
                             .findFirst()
                             .get();
                 } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到核心类，这将导致音源代理功能失效");
+                    Log.e(TAG, "ClassHelper: 找不到HttpUrl核心类，音源代理功能可能失效");
                 }
             }
             return clazz;
@@ -677,7 +396,7 @@ public class ClassHelper {
     }
 
     /**
-     * 获取请求参数
+     * 获取请求参数 - EAPIHook旧版方式需要
      */
     public static class HttpParams {
         private static Class<?> clazz;
@@ -702,8 +421,7 @@ public class ClassHelper {
                             .findFirst()
                             .get();
                 } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到核心类，这将导致音源代理功能失效");
+                    Log.e(TAG, "ClassHelper: 找不到HttpParams核心类，音源代理功能可能失效");
                 }
             }
             return clazz;
@@ -737,7 +455,7 @@ public class ClassHelper {
     }
 
     /**
-     * 拦截器
+     * 拦截器 - ProxyHook需要
      */
     public static class HttpInterceptor {
         private static Class<?> clazz;
@@ -754,18 +472,15 @@ public class ClassHelper {
                     List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
                     clazz = Stream.of(list)
                             .map(ClassHelper::getClassByXposed)
-                            // 检查类本身或其父类是否实现了Interceptor接口
                             .filter(c -> Stream.of(c.getInterfaces()).anyMatch(i -> i.getName().contains("Interceptor"))
                                     || (c.getSuperclass() != null && Stream.of(c.getSuperclass().getInterfaces()).anyMatch(i -> i.getName().contains("Interceptor"))))
                             .filter(c -> !Modifier.isAbstract(c.getModifiers()))
                             .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            // 新版网易云中Interceptor子类可能不再标记为final，移除final限制
                             .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType().getName().contains("Pair")))
                             .findFirst()
                             .get();
                 } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
-                    Log.e(TAG, "ClassHelper: 找不到核心类，这将导致音源代理功能失效");
+                    Log.e(TAG, "ClassHelper: 找不到HttpInterceptor核心类，音源代理功能可能失效");
                 }
             }
             return clazz;
@@ -775,7 +490,6 @@ public class ClassHelper {
             if (methodList == null) {
                 methodList = new ArrayList<>();
                 Class<?> interceptorClazz = getClazz(context);
-                // 如果目标类未找到（版本不匹配），直接返回空列表避免NPE
                 if (interceptorClazz != null) {
                     methodList.addAll(Stream.of(interceptorClazz.getDeclaredMethods())
                             .filter(m -> m.getExceptionTypes().length == 1)

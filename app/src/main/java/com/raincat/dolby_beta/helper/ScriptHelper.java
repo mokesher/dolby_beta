@@ -2,11 +2,10 @@ package com.raincat.dolby_beta.helper;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
-import android.content.Intent;
 import android.text.TextUtils;
+import android.util.Log;
 
 import com.raincat.dolby_beta.BuildConfig;
-import com.raincat.dolby_beta.Hook;
 import com.raincat.dolby_beta.net.HTTPSTrustManager;
 import com.raincat.dolby_beta.utils.Tools;
 import com.stericson.RootShell.execution.Command;
@@ -51,6 +50,8 @@ public class ScriptHelper {
 
     @SuppressLint("StaticFieldLeak")
     private static Context neteaseContext;
+    /** 标记是否已弹过toast，防止双端口场景下重复弹toast */
+    private static volatile boolean toastShown = false;
 
     private static String getScriptPath(Context context) {
         if (TextUtils.isEmpty(scriptPath))
@@ -90,7 +91,8 @@ public class ScriptHelper {
     }
 
     public static void startScript() {
-        String script = String.format("export ENABLE_FLAC=%s&&export MIN_BR=%s&&export QQ_COOKIE=\"%s\"&&export MIGU_COOKIE=\"%s\"&&libnode.so app.js -a 127.0.0.1 -o %s -p %s",
+        toastShown = false;
+        String script = String.format("export ENABLE_LOCAL_VIP=svip&&export BLOCK_ADS=true&&export SEARCH_ALBUM=true&&export FOLLOW_SOURCE_ORDER=false&&export ENABLE_FLAC=%s&&export MIN_BR=%s&&export QQ_COOKIE=\"%s\"&&export MIGU_COOKIE=\"%s\"&&libnode.so app.js -a 127.0.0.1 -o %s -p %s",
                 SettingHelper.getInstance().getSetting(SettingHelper.proxy_flac_key), SettingHelper.getInstance().getSetting(SettingHelper.proxy_priority_key) ? "256000" : "96000",
                 SettingHelper.getInstance().getQqCookie(),SettingHelper.getInstance().getMiguCookie(),SettingHelper.getInstance().getProxyOriginal(), SettingHelper.getInstance().getProxyPort() + ":" + (SettingHelper.getInstance().getProxyPort() + 1));
 
@@ -105,14 +107,12 @@ public class ScriptHelper {
             @Override
             public void commandOutput(int id, String line) {
                 if ((!line.contains("mERROR") && line.contains("Error:")) || line.contains("Port ") || line.contains("Please ")) {
-                    Intent intent = new Intent(Hook.msg_send_notification);
-                    intent.putExtra("message", line);
-                    intent.putExtra("title", "脚本产生如下错误信息，若脚本因此无法运行请提issue");
-                    if (neteaseContext != null)
-                        neteaseContext.sendBroadcast(intent);
+                    Log.e("dolby_beta", "脚本错误: " + line);
                 } else if (line.contains("HTTP Server running")) {
-                    if (neteaseContext != null && ExtraHelper.getExtraDate(ExtraHelper.SCRIPT_STATUS).equals("0"))
+                    if (!toastShown && neteaseContext != null) {
+                        toastShown = true;
                         Tools.showToastOnLooper(neteaseContext, "UnblockNeteaseMusic运行成功");
+                    }
                     ExtraHelper.setExtraDate(ExtraHelper.SCRIPT_STATUS, "1");
                 } else if (line.equals("Killed ")) {
                     if (SettingHelper.getInstance().getSetting(SettingHelper.proxy_master_key))

@@ -1,11 +1,9 @@
 package com.raincat.dolby_beta.hook;
 
 import android.content.Context;
-import android.net.Uri;
 import android.text.TextUtils;
 import android.util.Log;
 
-import com.raincat.dolby_beta.db.CloudDao;
 import com.raincat.dolby_beta.helper.ClassHelper;
 import com.raincat.dolby_beta.helper.EApiHookHelper;
 import com.raincat.dolby_beta.helper.EAPIHelper;
@@ -16,10 +14,12 @@ import com.raincat.dolby_beta.net.HTTPSTrustManager;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
@@ -28,10 +28,11 @@ import de.robv.android.xposed.XposedHelpers;
  *     author : RainCat
  *     e-mail : nining377@gmail.com
  *     time   : 2021/04/16
- *     desc   : 网络访问hook - 拦截EAPI请求响应并修改内容
+ *     desc   : 网络访问hook - 仅保留音源代理功能
+ *              拦截EAPI请求响应，检测空音源并通过代理获取替换音源
  *              旧版：通过ClassHelper.HttpResponse.getResultMethod() hook响应处理方法
  *              新版（9.5.30+）：通过hook EAPI解密拦截器interceptor.s.intercept()方法
- *     version: 2.1
+ *     version: 3.0
  * </pre>
  */
 public class EAPIHook {
@@ -49,32 +50,31 @@ public class EAPIHook {
     }
 
     /**
-     * 新版hook方式：hook EAPI解密拦截器 interceptor.s.intercept()
+     * 新版hook方式：动态查找EAPI解密拦截器并hook其intercept()方法
      *
-     * 设计思路（参考旧版逻辑简化）：
+     * 设计思路：
+     * 混淆后类名在不同版本间会变化（如9.5.25中是interceptor.r，9.5.30中是interceptor.s），
+     * 因此不能硬编码类名，需要通过类特征动态查找：
+     * 1. 实现okhttp3.Interceptor接口
+     * 2. 包含intercept方法
+     * 3. 内部调用了NeteaseMusicUtils.deserialdata（EAPI解密特征）
+     *
+     * hook流程：
      * 1. beforeHookedMethod：仅记录请求URL路径，不做任何修改
-     * 2. afterHookedMethod：读取解密后的响应内容，根据路径进行修改，重建ResponseBody
-     *
-     * 关键点：
-     * - EAPI加密拦截器会将请求路径从/eapi/改为/xeapi/，但代理服务器只识别/eapi/路径
-     * - 这个路径问题由ProxyHook在OkHttpClient层面解决（设置代理+SSL工厂+hostnameVerifier）
-     * - 本Hook只负责在解密后修改响应内容，不干预加密/解密过程
+     * 2. afterHookedMethod：读取解密后的响应内容，检测空音源并通过代理获取替换
      *
      * @param context 应用上下文
      * @return 是否hook成功
      */
     private boolean hookNewVersion(final Context context) {
         try {
-            // 查找EAPI解密拦截器类 com.netease.cloudmusic.network.interceptor.s
-            Class<?> eapiDecryptInterceptorClass = XposedHelpers.findClassIfExists(
-                    "com.netease.cloudmusic.network.interceptor.s", context.getClassLoader());
+            Class<?> eapiDecryptInterceptorClass = findEapiDecryptInterceptor(context);
             if (eapiDecryptInterceptorClass == null) {
-                XposedBridge.log("EAPIHook: 新版拦截器类interceptor.s未找到，回退旧版方式");
-                Log.d(TAG, "EAPIHook: 新版拦截器类interceptor.s未找到，回退旧版方式");
+                XposedBridge.log("EAPIHook: 未找到EAPI解密拦截器类，回退旧版方式");
+                Log.d(TAG, "EAPIHook: 未找到EAPI解密拦截器类，回退旧版方式");
                 return false;
             }
 
-            // 查找intercept方法
             Method interceptMethod = null;
             for (Method m : eapiDecryptInterceptorClass.getDeclaredMethods()) {
                 if (m.getName().equals("intercept")) {
@@ -83,13 +83,13 @@ public class EAPIHook {
                 }
             }
             if (interceptMethod == null) {
-                XposedBridge.log("EAPIHook: interceptor.s.intercept方法未找到，回退旧版方式");
+                XposedBridge.log("EAPIHook: EAPI解密拦截器intercept方法未找到，回退旧版方式");
                 return false;
             }
 
-            XposedBridge.log("EAPIHook: 使用新版hook方式");
+            XposedBridge.log("EAPIHook: 使用新版hook方式，拦截器类=" + eapiDecryptInterceptorClass.getName());
+            Log.d(TAG, "EAPIHook: 使用新版hook方式，拦截器类=" + eapiDecryptInterceptorClass.getName());
             XposedBridge.hookMethod(interceptMethod, new XC_MethodHook() {
-                // 用于在beforeHookedMethod和afterHookedMethod之间传递请求URL
                 private final ThreadLocal<String> requestUrlPath = new ThreadLocal<>();
 
                 @Override
@@ -110,19 +110,14 @@ public class EAPIHook {
                     String urlPath = requestUrlPath.get();
                     requestUrlPath.remove();
 
-                    // 代理和黑胶都未开启则跳过（与旧版逻辑一致）
-                    if (!SettingHelper.getInstance().isEnable(SettingHelper.black_key)
-                            && !SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key))
+                    // 代理未开启则跳过
+                    if (!SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key))
                         return;
 
-                    // 检查原始方法是否抛出了异常（如SSL证书验证失败、DNS解析失败等）
-                    // 重要：网络异常会导致intercept()抛出异常，如果不处理会传播到应用层导致闪退
+                    // 检查原始方法是否抛出了异常
                     Throwable throwable = param.getThrowable();
                     if (throwable != null) {
                         Log.e(TAG, "EAPIHook: intercept异常 - " + throwable.getMessage());
-                        if (throwable.getCause() != null) {
-                            Log.e(TAG, "EAPIHook: 异常根因 - " + throwable.getCause().getMessage());
-                        }
                         try {
                             String errorContent;
                             if (urlPath != null && (urlPath.contains("song/enhance/player/url")
@@ -142,19 +137,15 @@ public class EAPIHook {
                         return;
                     }
 
-                    // 获取okhttp3.Response响应对象
                     Object response = param.getResult();
                     if (response == null) return;
 
-                    // 从响应中读取解密后的内容
                     Object responseBody = XposedHelpers.callMethod(response, "body");
                     if (responseBody == null) return;
 
-                    // 只处理EAPI请求，非EAPI请求直接放行
-                    // 注意：EAPI加密拦截器会将/eapi/改为/xeapi/，所以需要同时匹配两种路径
+                    // 只处理EAPI请求
                     if (urlPath == null || (!urlPath.contains("/eapi/") && !urlPath.contains("/xeapi/"))) return;
 
-                    // 读取body内容（string()会消耗body，只能读取一次）
                     String original;
                     Object contentType;
                     try {
@@ -162,22 +153,18 @@ public class EAPIHook {
                         original = (String) XposedHelpers.callMethod(responseBody, "string");
                     } catch (Exception e) {
                         XposedBridge.log("EAPIHook: 读取responseBody失败 - " + e.getMessage());
-                        Log.e(TAG, "EAPIHook: 读取responseBody失败 - " + e.getMessage());
                         return;
                     }
                     if (TextUtils.isEmpty(original)) return;
 
-                    // 获取请求参数（从request中提取，与旧版从eapi对象提取类似）
                     Object chain = param.args[0];
                     Object request = XposedHelpers.callMethod(chain, "request");
                     LinkedHashMap<String, String> paramsMap = EApiHookHelper.getRequestParams(request);
 
-                    // 统一使用processEapiResponse处理响应内容
-                    // processEapiResponse内部会判断代理模式，决定是否跳过player/url的本地修改
+                    // 处理代理音源替换
                     String modified = processEapiResponse(context, urlPath, original, paramsMap);
 
-                    // 重要：由于string()已经消耗了原始body，无论是否修改内容都必须重建ResponseBody
-                    // 否则后续读取body会失败，导致页面无法访问
+                    // 无论是否修改内容都必须重建ResponseBody
                     String finalContent = (modified != null) ? modified : original;
                     rebuildResponseBody(param, response, contentType, finalContent);
                 }
@@ -192,35 +179,21 @@ public class EAPIHook {
 
     /**
      * 重建ResponseBody和Response
-     * 由于responseBody.string()会消耗原始body（OkHttp的设计，body只能读取一次），
-     * 所以无论是否修改了响应内容，都必须重建ResponseBody，否则后续读取会失败
-     *
-     * @param param       Xposed方法钩子参数
-     * @param response    原始okhttp3.Response对象
-     * @param contentType 原始ResponseBody的contentType
-     * @param content     要设置的响应内容
      */
     private void rebuildResponseBody(XC_MethodHook.MethodHookParam param, Object response,
                                       Object contentType, String content) throws Exception {
-        // 使用app的classloader查找okhttp3.ResponseBody，不能用null
-        // okhttp3是打包在app内部的，不在系统classloader中
         Class<?> responseBodyClass = XposedHelpers.findClass("okhttp3.ResponseBody", appContext.getClassLoader());
-        // 使用MediaType + String创建新的ResponseBody
         Object newBody;
         try {
-            // OkHttp 3.x: ResponseBody.create(MediaType, String)
             newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create", contentType, content);
         } catch (Exception e) {
-            // OkHttp 4.x: ResponseBody.create(String, MediaType?) 参数顺序可能不同
             try {
                 newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create", content, contentType);
             } catch (Exception e2) {
-                // 最终回退：使用MediaType + long + String重载
                 newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create",
                         contentType, content.length(), content);
             }
         }
-        // 使用Response.newBuilder重建Response
         Object newResponse = XposedHelpers.callMethod(response, "newBuilder");
         newResponse = XposedHelpers.callMethod(newResponse, "body", newBody);
         newResponse = XposedHelpers.callMethod(newResponse, "header",
@@ -230,13 +203,115 @@ public class EAPIHook {
     }
 
     /**
-     * 旧版hook方式：通过ClassHelper.HttpResponse.getResultMethod() hook响应处理方法
-     * 适用于旧版网易云，其中EAPI响应通过HttpResponse类的方法返回String/JSONObject
+     * 动态查找EAPI解密拦截器类
+     *
+     * 不同版本的混淆后类名不同（如9.5.25中是interceptor.r，9.5.30中是interceptor.s），
+     * 因此通过类特征来识别，而非硬编码类名。
+     *
+     * 识别特征：
+     * 1. 位于com.netease.cloudmusic.network.interceptor包下
+     * 2. 实现okhttp3.Interceptor接口
+     * 3. 声明了protected方法b(ResponseBody)（解密Retrofit响应）
+     * 4. 声明了private方法a(f, ResponseBody)（解密EAPI响应）
      *
      * @param context 应用上下文
+     * @return EAPI解密拦截器Class，未找到返回null
+     */
+    private Class<?> findEapiDecryptInterceptor(Context context) {
+        ClassLoader cl = context.getClassLoader();
+        Class<?> interceptorClass = XposedHelpers.findClassIfExists("okhttp3.Interceptor", cl);
+        if (interceptorClass == null) {
+            XposedBridge.log("EAPIHook: okhttp3.Interceptor接口未找到");
+            return null;
+        }
+
+        // 尝试已知的类名列表（从新到旧），优先匹配
+        String[] knownClassNames = {
+                "com.netease.cloudmusic.network.interceptor.s",  // 9.5.30
+                "com.netease.cloudmusic.network.interceptor.r",  // 9.5.25
+        };
+        for (String className : knownClassNames) {
+            Class<?> clazz = XposedHelpers.findClassIfExists(className, cl);
+            if (clazz != null && isEapiDecryptInterceptor(clazz, interceptorClass)) {
+                XposedBridge.log("EAPIHook: 通过已知类名找到EAPI解密拦截器: " + className);
+                return clazz;
+            }
+        }
+
+        // 已知类名未命中，遍历interceptor包下所有类查找
+        XposedBridge.log("EAPIHook: 已知类名未命中，尝试遍历查找...");
+        try {
+            // 通过dex扫描interceptor包下实现Interceptor接口的类
+            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                    "^com\\.netease\\.cloudmusic\\.network\\.interceptor\\.[a-z]{1,3}$");
+            java.util.List<String> classList = ClassHelper.getFilteredClasses(pattern, null);
+            for (String className : classList) {
+                try {
+                    Class<?> clazz = XposedHelpers.findClassIfExists(className, cl);
+                    if (clazz != null && isEapiDecryptInterceptor(clazz, interceptorClass)) {
+                        XposedBridge.log("EAPIHook: 通过遍历找到EAPI解密拦截器: " + className);
+                        return clazz;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception e) {
+            XposedBridge.log("EAPIHook: 遍历查找EAPI解密拦截器失败: " + e.getMessage());
+        }
+
+        return null;
+    }
+
+    /**
+     * 判断一个类是否是EAPI解密拦截器
+     *
+     * 特征判断：
+     * 1. 实现okhttp3.Interceptor接口
+     * 2. 包含intercept方法
+     * 3. 包含protected方法b(ResponseBody)（Retrofit解密）
+     * 4. 包含private方法a(xxx, ResponseBody)（EAPI解密）
+     *
+     * @param clazz 待检查的类
+     * @param interceptorClass okhttp3.Interceptor接口Class
+     * @return 是否是EAPI解密拦截器
+     */
+    private boolean isEapiDecryptInterceptor(Class<?> clazz, Class<?> interceptorClass) {
+        try {
+            // 必须实现Interceptor接口
+            if (!interceptorClass.isAssignableFrom(clazz)) return false;
+
+            // 必须有intercept方法
+            boolean hasIntercept = false;
+            boolean hasDecryptMethod = false;
+
+            for (Method m : clazz.getDeclaredMethods()) {
+                if (m.getName().equals("intercept")) {
+                    hasIntercept = true;
+                }
+                // EAPI解密拦截器有protected b(ResponseBody)方法用于Retrofit解密
+                // 以及private a(xxx, ResponseBody)方法用于EAPI解密
+                // 这两个方法的共同特征是参数包含ResponseBody
+                if (m.getName().equals("b") || m.getName().equals("a")) {
+                    Class<?>[] paramTypes = m.getParameterTypes();
+                    for (Class<?> pt : paramTypes) {
+                        if (pt.getName().contains("ResponseBody")) {
+                            hasDecryptMethod = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            return hasIntercept && hasDecryptMethod;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 旧版hook方式：通过ClassHelper.HttpResponse.getResultMethod() hook响应处理方法
      */
     private void hookOldVersion(final Context context) {
-        // 获取要hook的方法，如果为null说明目标类未找到（可能是网易云版本不匹配），跳过hook避免崩溃
         Method resultMethod = ClassHelper.HttpResponse.getResultMethod(context);
         if (resultMethod == null) {
             XposedBridge.log("EAPIHook: getResultMethod返回null，跳过hook");
@@ -244,13 +319,11 @@ public class EAPIHook {
             return;
         }
         XposedBridge.log("EAPIHook: 使用旧版hook方式（HttpResponse.getResultMethod）");
-        Log.d(TAG, "EAPIHook: 使用旧版hook方式（HttpResponse.getResultMethod）");
         XposedBridge.hookMethod(resultMethod, new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                // 代理和黑胶都未开启
-                if (!SettingHelper.getInstance().isEnable(SettingHelper.black_key)
-                        && !SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key))
+                // 代理未开启则跳过
+                if (!SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key))
                     return;
                 // 返回参数不对
                 if ((!(param.getResult() instanceof String) && !(param.getResult() instanceof JSONObject)))
@@ -262,12 +335,11 @@ public class EAPIHook {
                 }
                 ClassHelper.HttpResponse httpResponse = new ClassHelper.HttpResponse(param.thisObject);
                 Object eapi = httpResponse.getEapi(context);
-                Uri uri = ClassHelper.HttpUrl.getUri(context, eapi);
+                android.net.Uri uri = ClassHelper.HttpUrl.getUri(context, eapi);
                 if (!uri.getPath().contains("/eapi/"))
                     return;
                 String path = uri.getPath();
 
-                // 获取请求参数
                 LinkedHashMap<String, String> paramsMap = ClassHelper.HttpParams.getParams(context, eapi);
                 String modified = processEapiResponse(context, path, original, paramsMap);
 
@@ -281,16 +353,11 @@ public class EAPIHook {
     /**
      * 检查音源响应中是否有空URL，如果有则通过代理服务器获取替换音源
      *
-     * 设计思路（参考旧版代理逻辑）：
+     * 设计思路：
      * 1. 先让请求正常走网易云服务器，获取原始响应
      * 2. 检查响应中是否有歌曲的URL为空（无法播放的付费/下架歌曲）
      * 3. 只有URL为空的歌曲才通过代理服务器获取替换音源
      * 4. 将替换音源合并到原始响应中
-     *
-     * 代理请求方式：
-     * 使用HttpURLConnection通过HTTP代理发送请求到网易云API，
-     * 代理服务器（UnblockNeteaseMusic）会拦截请求并返回替换音源。
-     * 请求使用非EAPI的普通API端点，避免EAPI加解密兼容性问题。
      *
      * @param context    应用上下文
      * @param modified   经过modifyPlayer处理后的响应JSON
@@ -406,36 +473,22 @@ public class EAPIHook {
 
     /**
      * 解码代理服务器返回的/package/格式URL
-     *
-     * 代理服务器（UnblockNeteaseMusic）返回的URL格式为：
-     * https://music.163.com/package/{base64编码的实际URL}/{songId}.{ext}
-     *
-     * 客户端无法直接访问/package/路径（返回404），
-     * 需要解码Base64部分获取实际的音源URL（如酷我、QQ音乐的直链）
-     *
-     * @param packageUrl 代理服务器返回的/package/格式URL
-     * @return 解码后的实际音源URL，如果不是/package/格式或解码失败返回null
      */
     private String decodePackageUrl(String packageUrl) {
         try {
             if (packageUrl == null || !packageUrl.contains("/package/")) return null;
 
-            // 提取/package/后面的Base64部分
-            // URL格式: https://music.163.com/package/{base64}/{songId}.{ext}
             int packageStart = packageUrl.indexOf("/package/");
             String afterPackage = packageUrl.substring(packageStart + "/package/".length());
 
-            // Base64部分在第一个/之前
             int slashIndex = afterPackage.indexOf('/');
             if (slashIndex <= 0) return null;
 
             String base64Part = afterPackage.substring(0, slashIndex);
 
-            // Base64解码（URL安全的Base64可能将+替换为-，/替换为_）
             byte[] decoded = android.util.Base64.decode(base64Part, android.util.Base64.DEFAULT);
             String actualUrl = new String(decoded, "UTF-8");
 
-            // 验证解码结果是有效的URL
             if (actualUrl.startsWith("http://") || actualUrl.startsWith("https://")) {
                 return actualUrl;
             }
@@ -449,29 +502,15 @@ public class EAPIHook {
 
     /**
      * 通过代理服务器请求替换音源URL
-     *
-     * 使用HttpURLConnection配置HTTP代理，向网易云API发送请求。
-     * 代理服务器（UnblockNeteaseMusic）会拦截请求，对无法播放的歌曲返回替换音源。
-     * 使用非EAPI的普通API端点，避免EAPI加解密兼容性问题。
-     *
-     * @param context     应用上下文
-     * @param ids         需要替换的歌曲ID列表，格式: "id1_0,id2_0"
-     * @param level       音质等级（如exhigh, lossless等）
-     * @param encodeType  编码类型（如aac, flac等）
-     * @return 代理服务器返回的JSON字符串，失败返回null
      */
     private String requestProxyForSongUrl(Context context, String ids, String level, String encodeType) {
         try {
-            // 获取代理配置
             String proxyHost = SettingHelper.getInstance().getSetting(SettingHelper.proxy_server_key) ?
                     SettingHelper.getInstance().getHttpProxy() : "127.0.0.1";
             int proxyPort = SettingHelper.getInstance().getProxyPort();
 
             Log.d(TAG, "EAPIHook: 代理请求 ids=" + ids + " level=" + level);
 
-            // 构建请求URL（使用非EAPI的普通API端点，代理服务器能识别）
-            // ids格式必须与原始请求一致：JSON字符串数组，如 ["2648942804_0","1234567_0"]
-            // 每个id需要用双引号包裹
             String[] idArray = ids.split(",");
             StringBuilder idsJson = new StringBuilder("[");
             for (int i = 0; i < idArray.length; i++) {
@@ -485,11 +524,9 @@ public class EAPIHook {
                     + "&level=" + level
                     + "&encodeType=" + encodeType;
 
-            // 配置HTTP代理
             java.net.Proxy proxy = new java.net.Proxy(java.net.Proxy.Type.HTTP,
                     new java.net.InetSocketAddress(proxyHost, proxyPort));
 
-            // 创建独立的SSL上下文，不影响全局设置
             javax.net.ssl.SSLContext sslContext = javax.net.ssl.SSLContext.getInstance("TLS");
             sslContext.init(null, new javax.net.ssl.TrustManager[]{new HTTPSTrustManager()}, new java.security.SecureRandom());
 
@@ -503,8 +540,6 @@ public class EAPIHook {
             conn.setRequestProperty("Cookie", "os=android");
             conn.setRequestProperty("User-Agent", "NeteaseMusic/8.10.05");
             conn.setRequestProperty("Accept", "*/*");
-            // 禁用gzip压缩，避免HttpURLConnection自动解压与代理服务器压缩行为冲突
-            // 导致 "ID1ID2: actual 0x7b22 != expected 0x1f8b" 异常
             conn.setRequestProperty("Accept-Encoding", "identity");
 
             int responseCode = conn.getResponseCode();
@@ -548,30 +583,22 @@ public class EAPIHook {
 
     /**
      * 处理EAPI响应内容，根据请求路径进行不同的修改
-     *
-     * 代理模式下的音源替换策略（参考旧版逻辑）：
-     * 1. 所有音源请求先正常走网易云服务器，获取原始响应
-     * 2. 对响应执行modifyPlayer（黑胶逻辑：设置fee=0, flag=0等）
-     * 3. 检查响应中是否有歌曲URL为空（无法播放的付费/下架歌曲）
-     * 4. 只有URL为空的歌曲才通过代理服务器获取替换音源
-     * 5. 将替换音源合并到原始响应中
-     *
-     * 这样正常可播放的歌曲不受影响，只有获取不到音源的歌曲才走代理替换。
+     * 仅保留音源代理相关逻辑
      *
      * @param context    应用上下文
-     * @param path       请求路径（可能包含/eapi/或/xeapi/）
+     * @param path       请求路径
      * @param original   原始响应内容
      * @param paramsMap  请求参数Map
      * @return 修改后的响应内容，如果不需要修改返回null
      */
     private String processEapiResponse(Context context, String path, String original,
                                         LinkedHashMap<String, String> paramsMap) throws Throwable {
-        // 检查代理模式是否已启动：代理主开关开启 且 脚本状态为1（已启动）
+        // 检查代理模式是否已启动
         boolean proxyActive = SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key)
                 && "1".equals(ExtraHelper.getExtraDate(ExtraHelper.SCRIPT_STATUS));
 
         if (path.contains("song/enhance/player/url")) {
-            // 先执行本地黑胶修改（设置fee=0, flag=0等），无论是否开启代理
+            // 先执行本地修改（设置fee=0, flag=0等），使歌曲可播放
             String modified = EAPIHelper.modifyPlayer(original);
 
             // 代理模式下，检查音源是否为空，为空时通过代理获取替换音源
@@ -593,119 +620,201 @@ public class EAPIHook {
                 modified = replaceEmptyUrlWithProxy(context, modified, paramsMap, path);
             }
             return modified;
-        } else if (path.contains("v1/playlist/manipulate/tracks")) {
-            return EAPIHelper.modifyManipulate(paramsMap, original);
-        } else if (path.contains("song/like")) {
-            return EAPIHelper.modifyLike(paramsMap, original);
-        } else if (path.contains("sound/mobile") || path.contains("page=audio_effect")) {
-            return EAPIHelper.modifyEffect(original);
         } else if (path.contains("batch")) {
-            return processBatchResponse(context, original);
-        } else if (path.contains("upload/cloud/info/v2")) {
-            JSONObject jsonObject = new JSONObject(original);
-            jsonObject = jsonObject.getJSONObject("privateCloud");
-            jsonObject = jsonObject.getJSONObject("simpleSong");
-            original = original.replace("\"waitTime\":60,", "\"waitTime\":5,");
-            CloudDao.getInstance(context).saveSong(Integer.parseInt(jsonObject.getString("id")), original);
-            return original;
-        } else if (path.contains("cloud/pub/v2")) {
-            String songid = EAPIHelper.decrypt(paramsMap.get("params")).getString("songid");
-            EAPIHelper.uploadCloud(songid);
-            return CloudDao.getInstance(context).getSong(Integer.parseInt(songid));
+            // batch请求中包含歌曲详情和版权信息，需要修改privilege使无版权歌曲可播放
+            return processBatchPrivilege(original);
+        } else if (path.contains("song/detail") || path.contains("song/privilege")) {
+            // 歌曲详情/版权信息请求，修改privilege使无版权歌曲可播放
+            return processSongPrivilege(original);
         }
         return null;
     }
 
     /**
-     * 处理batch请求的响应
+     * 处理batch请求中的版权信息
+     *
+     * batch请求会将多个API请求合并到一个响应中，格式如：
+     * {"/api/v1/song/detail": {...}, "/api/v1/playlist/manipulate/tracks": {...}}
+     *
+     * 需要遍历所有key，找到包含songs/privilege的响应并修改版权字段
+     *
+     * @param original 原始响应
+     * @return 修改后的响应，无需修改返回null
      */
-    private String processBatchResponse(Context context, String original) throws Throwable {
-        if (original.contains("comment\\/banner\\/get")) {
-            JSONObject jsonObject = new JSONObject(original);
-            if (!jsonObject.isNull("/api/content/exposure/comment/banner/get")) {
-                JSONObject object = new JSONObject();
-                object.put("code", 200);
-                object.put("data", new JSONObject());
-                jsonObject.put("/api/content/exposure/comment/banner/get", object);
-            }
-            if (!jsonObject.isNull("/api/v1/content/exposure/comment/banner/get")) {
-                JSONObject object = jsonObject.getJSONObject("/api/v1/content/exposure/comment/banner/get");
-                JSONObject data = object.getJSONObject("data");
-                data.put("count", 0);
-                data.put("offset", 999999999);
-                data.put("records", new JSONArray());
-                data.put("message", "");
-                object.put("data", data);
-                jsonObject.put("/api/v1/content/exposure/comment/banner/get", object);
-            }
-            return jsonObject.toString();
-        } else if (SettingHelper.getInstance().isEnable(SettingHelper.fix_comment_key) &&
-                original.contains("\\/api\\/resource\\/comment\\/musiciansaid\\/authors")) {
-            JSONObject jsonObject = new JSONObject(original);
-            JSONObject object = jsonObject.getJSONObject("/api/resource/comment/musiciansaid/authors");
-            JSONObject data = object.getJSONObject("data");
-            JSONArray team = data.getJSONArray("team");
-            for (int i = 0; i < team.length(); i++) {
-                JSONObject o = team.getJSONObject(i);
-                String s = o.optString("authorTypeText");
-                if (s != null && s.equals("作者")) {
-                    long uid = o.optLong("uid");
-                    long artistId = o.optLong("artistId");
-                    if (uid > 2147483647) {
-                        JSONObject artistJSONObject = jsonObject.getJSONObject("/api/auth/artist");
-                        JSONObject authJSONObject = artistJSONObject.getJSONObject("auth");
-                        while (uid > 2147483647)
-                            uid = uid / 10;
-                        authJSONObject.put(artistId + "", uid);
-                        artistJSONObject.put("auth", authJSONObject);
-                        jsonObject.put("/api/auth/artist", artistJSONObject);
-                        return jsonObject.toString();
+    private String processBatchPrivilege(String original) throws Throwable {
+        JSONObject jsonObject = new JSONObject(original);
+        boolean modified = false;
+
+        // 遍历batch响应中的所有key
+        java.util.Iterator<String> keys = jsonObject.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            if (!jsonObject.isNull(key)) {
+                Object value = jsonObject.get(key);
+                if (value instanceof JSONObject) {
+                    JSONObject subObj = (JSONObject) value;
+                    // 处理包含songs数组的响应（如song/detail）
+                    if (subObj.has("songs") || subObj.has("privileges")) {
+                        modifyPrivilegeInResponse(subObj);
+                        modified = true;
                     }
                 }
             }
         }
-        return null;
+
+        return modified ? jsonObject.toString() : null;
     }
 
-    private void logcat(String msg) {
-        int max_str_length = 1800;
-        //大于4000时
-        while (msg.length() > max_str_length) {
-            XposedBridge.log(msg.substring(0, max_str_length));
-            msg = msg.substring(max_str_length);
+    /**
+     * 处理歌曲详情/版权信息请求
+     *
+     * 响应格式：
+     * {"songs": [...], "privileges": [...]}
+     * 或
+     * {"code": 200, "data": [{"privilege": {...}, ...}]}
+     *
+     * @param original 原始响应
+     * @return 修改后的响应，无需修改返回null
+     */
+    private String processSongPrivilege(String original) throws Throwable {
+        JSONObject jsonObject = new JSONObject(original);
+        boolean modified = modifyPrivilegeInResponse(jsonObject);
+        return modified ? jsonObject.toString() : null;
+    }
+
+    /**
+     * 修改响应中的版权信息，使无版权歌曲显示为可播放
+     *
+     * 核心逻辑：
+     * - offlinestatus < 0 表示无版权，客户端会弹出"无版权"弹窗
+     * - playMaxLevel > 0 表示可在线播放
+     * - downMaxLevel > 0 表示可下载
+     * - flag & 128 (NO_COPRYRIGHT) 表示无版权标记
+     *
+     * 修改策略：
+     * 1. offlinestatus: 设为0（有版权）
+     * 2. playMaxLevel: 设为320000（可播放最高品质）
+     * 3. downMaxLevel: 设为320000（可下载最高品质）
+     * 4. fee: 设为0（免费）
+     * 5. flag: 清除NO_COPRYRIGHT标记
+     * 6. payed: 设为0
+     *
+     * @param jsonObject 响应JSON对象
+     * @return 是否进行了修改
+     */
+    private boolean modifyPrivilegeInResponse(JSONObject jsonObject) throws Throwable {
+        boolean modified = false;
+
+        // 处理privileges数组
+        if (jsonObject.has("privileges")) {
+            JSONArray privileges = jsonObject.optJSONArray("privileges");
+            if (privileges != null) {
+                for (int i = 0; i < privileges.length(); i++) {
+                    JSONObject priv = privileges.optJSONObject(i);
+                    if (priv != null && modifySinglePrivilege(priv)) {
+                        modified = true;
+                    }
+                }
+            }
         }
-        //剩余部分
-        XposedBridge.log(msg);
+
+        // 处理songs数组中的privilege字段
+        if (jsonObject.has("songs")) {
+            JSONArray songs = jsonObject.optJSONArray("songs");
+            if (songs != null) {
+                for (int i = 0; i < songs.length(); i++) {
+                    JSONObject song = songs.optJSONObject(i);
+                    if (song != null && song.has("privilege")) {
+                        JSONObject priv = song.optJSONObject("privilege");
+                        if (priv != null && modifySinglePrivilege(priv)) {
+                            modified = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 处理data数组中的privilege字段
+        if (jsonObject.has("data")) {
+            Object dataObj = jsonObject.get("data");
+            if (dataObj instanceof JSONArray) {
+                JSONArray dataArray = (JSONArray) dataObj;
+                for (int i = 0; i < dataArray.length(); i++) {
+                    JSONObject item = dataArray.optJSONObject(i);
+                    if (item != null && item.has("privilege")) {
+                        JSONObject priv = item.optJSONObject("privilege");
+                        if (priv != null && modifySinglePrivilege(priv)) {
+                            modified = true;
+                        }
+                    }
+                }
+            } else if (dataObj instanceof JSONObject) {
+                JSONObject data = (JSONObject) dataObj;
+                if (data.has("privilege")) {
+                    JSONObject priv = data.optJSONObject("privilege");
+                    if (priv != null && modifySinglePrivilege(priv)) {
+                        modified = true;
+                    }
+                }
+            }
+        }
+
+        return modified;
+    }
+
+    /**
+     * 修改单个privilege对象，使歌曲显示为可播放
+     *
+     * @param priv privilege JSON对象
+     * @return 是否进行了修改
+     */
+    private boolean modifySinglePrivilege(JSONObject priv) throws Throwable {
+        // 只修改无版权的歌曲（offlinestatus < 0 或 fee > 0 或有NO_COPRYRIGHT标记）
+        int offlinestatus = priv.optInt("offlinestatus", 0);
+        int fee = priv.optInt("fee", 0);
+        int flag = priv.optInt("flag", 0);
+
+        // 如果已经是免费且有版权，不需要修改
+        if (offlinestatus >= 0 && fee == 0 && (flag & 128) == 0) {
+            return false;
+        }
+
+        // 修改版权状态
+        priv.put("offlinestatus", 0);           // 有版权
+        priv.put("playMaxLevel", 320000);        // 可播放（最高品质）
+        priv.put("downMaxLevel", 320000);        // 可下载（最高品质）
+        priv.put("fee", 0);                      // 免费
+        priv.put("flag", flag & ~128);           // 清除NO_COPRYRIGHT标记
+        priv.put("payed", 0);                    // 未付费（免费不需要付费）
+        priv.put("maxbr", 999000);               // 最高音质
+
+        // 清除试听信息
+        priv.remove("freeTrialInfo");
+        priv.remove("freeTrialPrivilege");
+
+        return true;
     }
 
     /**
      * 构造一个HTTP错误响应对象
-     * 当intercept()方法抛出异常（如SSL证书验证失败、DNS解析失败等）时，
-     * 需要构造一个错误响应来替代异常，防止异常传播导致应用闪退。
-     *
-     * @param param   Xposed方法钩子参数，用于获取原始Chain构建Response
-     * @param content 响应体内容（JSON格式的错误信息）
-     * @return 构造的okhttp3.Response对象，如果构造失败返回null
      */
     private Object buildErrorResponse(XC_MethodHook.MethodHookParam param, String content) {
         try {
             Object chain = param.args[0];
             Object request = XposedHelpers.callMethod(chain, "request");
 
-            // 创建包含错误信息的ResponseBody
             Class<?> responseBodyClass = XposedHelpers.findClass("okhttp3.ResponseBody", appContext.getClassLoader());
             Object mediaType = XposedHelpers.callStaticMethod(
                     XposedHelpers.findClass("okhttp3.MediaType", appContext.getClassLoader()),
                     "parse", "application/json; charset=utf-8");
             Object errorBody = XposedHelpers.callStaticMethod(responseBodyClass, "create", mediaType, content);
 
-            // 构建错误Response：code=500, message="Network Error"
             Class<?> responseBuilderClass = XposedHelpers.findClass(
                     "okhttp3.Response$Builder", appContext.getClassLoader());
             Object responseBuilder = responseBuilderClass.newInstance();
             XposedHelpers.callMethod(responseBuilder, "request", request);
             XposedHelpers.callMethod(responseBuilder, "protocol",
-                    XposedHelpers.callStaticMethod(
+                    XposedHelpers.getStaticObjectField(
                             XposedHelpers.findClass("okhttp3.Protocol", appContext.getClassLoader()),
                             "HTTP_1_1"));
             XposedHelpers.callMethod(responseBuilder, "code", 500);
@@ -716,6 +825,117 @@ public class EAPIHook {
             Log.e(TAG, "EAPIHook: buildErrorResponse失败 - " + e.getMessage());
             XposedBridge.log("EAPIHook: buildErrorResponse失败 - " + e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 不变灰功能：Hook MusicInfo.hasCopyRight() 返回true
+     *
+     * 原理：
+     * MusicInfo.hasCopyRight() 内部调用 SongPrivilege.hasCopyRight()，
+     * 而 SongPrivilege.hasCopyRight() = offlinestatus >= 0。
+     * 当歌曲无版权时 offlinestatus < 0，hasCopyRight() 返回false，
+     * 客户端会弹出"因合作方要求，该资源暂时无法收听"弹窗。
+     *
+     * 直接Hook hasCopyRight() 返回true，让客户端认为所有歌曲都有版权，
+     * 这样就不会弹无版权弹窗，而是进入播放页面请求player/url，
+     * 然后由代理服务器替换空音源。
+     */
+    public static void hookGrayFunction(Context context) {
+        if (!SettingHelper.getInstance().isEnable(SettingHelper.proxy_gray_key))
+            return;
+
+        try {
+            Class<?> musicInfoClass = XposedHelpers.findClassIfExists(
+                    "com.netease.cloudmusic.meta.MusicInfo", context.getClassLoader());
+            if (musicInfoClass != null) {
+                XposedHelpers.findAndHookMethod(musicInfoClass, "hasCopyRight",
+                        XC_MethodReplacement.returnConstant(true));
+                XposedBridge.log("EAPIHook: 成功hook MusicInfo.hasCopyRight()");
+            }
+        } catch (Throwable e) {
+            XposedBridge.log("EAPIHook: hook hasCopyRight失败 - " + e.getMessage());
+        }
+    }
+
+    /**
+     * 音源代理功能：Hook SongPrivilege的设置方法，使歌曲可播放
+     *
+     * 原理：
+     * 当代理总开关开启时，Hook SongPrivilege.setDownloadMaxbr()或setFreeLevel()方法，
+     * 在设置下载码率时同时设置playMaxLevel、downMaxLevel等字段，
+     * 使歌曲在UI上显示为可播放状态。
+     *
+     * 这解决了仅靠网络响应修改不够的问题：
+     * - 网络响应修改只能修改从服务器获取的数据
+     * - 但客户端本地缓存的privilege数据仍可能标记歌曲为不可播放
+     * - Hook Java方法可以在任何时机（包括从缓存读取时）修改privilege
+     */
+    public static void hookSongPrivilege(Context context) {
+        if (!SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key))
+            return;
+
+        try {
+            Class<?> songPrivilegeClass = XposedHelpers.findClassIfExists(
+                    "com.netease.cloudmusic.meta.virtual.SongPrivilege", context.getClassLoader());
+            if (songPrivilegeClass == null) {
+                XposedBridge.log("EAPIHook: SongPrivilege类未找到，跳过hook");
+                return;
+            }
+
+            // 查找设置方法，不同版本方法名可能不同
+            Method method = null;
+            try {
+                method = songPrivilegeClass.getMethod("setDownloadMaxbr", int.class);
+            } catch (NoSuchMethodException e) {
+                try {
+                    method = songPrivilegeClass.getMethod("setFreeLevel", int.class);
+                } catch (NoSuchMethodException ex) {
+                    XposedBridge.log("EAPIHook: 未找到setDownloadMaxbr或setFreeLevel方法");
+                    return;
+                }
+            }
+
+            XposedBridge.hookMethod(method, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    Object object = param.thisObject;
+                    long id = (long) XposedHelpers.callMethod(object, "getId");
+                    // id为0表示无效数据，跳过
+                    if (id == 0) return;
+
+                    // 读取maxbr字段
+                    int maxbr = 0;
+                    Field[] fields = object.getClass().getDeclaredFields();
+                    for (Field field : fields) {
+                        if (field.getType() == int.class && field.getName().equals("maxbr")) {
+                            field.setAccessible(true);
+                            maxbr = (int) field.get(object);
+                            break;
+                        }
+                    }
+                    if (maxbr == 0) maxbr = 999000;
+
+                    try {
+                        param.args[0] = maxbr;
+                        XposedHelpers.callMethod(object, "setSubPriv", 1);
+                        XposedHelpers.callMethod(object, "setSharePriv", 1);
+                        XposedHelpers.callMethod(object, "setCommentPriv", 1);
+                        XposedHelpers.callMethod(object, "setDownMaxLevel", maxbr);
+                        XposedHelpers.callMethod(object, "setPlayMaxLevel", maxbr);
+                        try {
+                            if (object.getClass().getDeclaredMethod("setPlayMaxbr", int.class) != null)
+                                XposedHelpers.callMethod(object, "setPlayMaxbr", maxbr);
+                        } catch (NoSuchMethodException ignored) {
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "EAPIHook: hookSongPrivilege设置字段失败 - " + e.getMessage());
+                    }
+                }
+            });
+            XposedBridge.log("EAPIHook: 成功hook SongPrivilege设置方法");
+        } catch (Throwable e) {
+            XposedBridge.log("EAPIHook: hook SongPrivilege失败 - " + e.getMessage());
         }
     }
 }

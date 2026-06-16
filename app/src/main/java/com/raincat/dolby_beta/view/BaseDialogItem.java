@@ -64,10 +64,10 @@ public class BaseDialogItem extends LinearLayout {
         linearLayout.setLayoutParams(layoutParams);
 
         titleView = new TextView(context);
-        titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         titleView.setTextColor(Color.BLACK);
         subView = new TextView(context);
-        subView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        subView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9);
         subView.setTextColor(Color.DKGRAY);
         linearLayout.addView(titleView);
         linearLayout.addView(subView);

@@ -10,15 +10,9 @@ import com.raincat.dolby_beta.helper.SettingHelper;
 import com.raincat.dolby_beta.view.BaseDialogInputItem;
 
 /**
- * <pre>
- *     author : RainCat
- *     e-mail : nining377@gmail.com
- *     time   : 2021/09/10
- *     desc   : 音源切换
- *     version: 1.0
- * </pre>
+ * 代理源配置视图
+ * 允许用户配置音源切换的代理源（空格隔开）
  */
-
 public class ProxyOriginalView extends BaseDialogInputItem {
     public ProxyOriginalView(Context context, AttributeSet attrs, int defStyle) {
         super(context, attrs, defStyle);
@@ -47,12 +41,10 @@ public class ProxyOriginalView extends BaseDialogInputItem {
         editView.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence charSequence, int i, int i1, int i2) {
-
             }
 
             @Override
             public void onTextChanged(CharSequence charSequence, int i, int i1, int i2) {
-
             }
 
             @Override
