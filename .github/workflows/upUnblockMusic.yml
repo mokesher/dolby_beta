@@ -36,7 +36,7 @@ jobs:
         
     - name: Update UnblockNeteaseMusic
       run: |
-        git clone --depth=1 https://github.com/UnblockNeteaseMusic/server.git
+        git clone --depth=1 https://github.com/mokesher/server.git
         cd server && zip -r ../UnblockNeteaseMusic.zip . && cd ..
         
     - name: Decompile and modify
