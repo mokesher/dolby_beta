@@ -57,11 +57,11 @@ jobs:
           --ksPass 123456 \
           --ksKeyPass 123456 \
           --out .
-        mv unsigned-aligned-signed.apk dolby_beta_modified.apk
+        mv unsigned-aligned-signed.apk dolby_beta_modified111.apk
         
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: modified-apk
-        path: dolby_beta_modified.apk
+        path: dolby_beta_modified111.apk
         retention-days: 30
