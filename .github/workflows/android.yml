@@ -55,17 +55,17 @@ jobs:
       #   KEY_ALIAS          - 密钥别名
       #   KEY_PASSWORD       - 密钥密码
       # 生成 KEYSTORE_BASE64 的命令：base64 -w 0 app/Zruiry.jks
-      - name: Prepare signing config
-        run: |
-          # 先删除仓库中已有的签名配置，避免追加导致旧配置残留
-          rm -f app/signing.properties app/lin.jks
-          # 创建签名配置文件（使用 > 覆盖写入）
-          echo "KEYSTORE_FILE = ./Zruiry.jks" > app/signing.properties
-          echo "KEYSTORE_PASSWORD = ${{ secrets.KEYSTORE_PASSWORD }}" >> app/signing.properties
-          echo "KEY_ALIAS = ${{ secrets.KEY_ALIAS }}" >> app/signing.properties
-          echo "KEY_PASSWORD = ${{ secrets.KEY_PASSWORD }}" >> app/signing.properties
-          # 从 Secrets 解码写入签名密钥库文件
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/Zruiry.jks
+#      - name: Prepare signing config
+#        run: |
+#          # 先删除仓库中已有的签名配置，避免追加导致旧配置残留
+#          rm -f app/signing.properties app/lin.jks
+#          # 创建签名配置文件（使用 > 覆盖写入）
+#          echo "KEYSTORE_FILE = ./Zruiry.jks" > app/signing.properties
+#          echo "KEYSTORE_PASSWORD = ${{ secrets.KEYSTORE_PASSWORD }}" >> app/signing.properties
+#          echo "KEY_ALIAS = ${{ secrets.KEY_ALIAS }}" >> app/signing.properties
+#          echo "KEY_PASSWORD = ${{ secrets.KEY_PASSWORD }}" >> app/signing.properties
+#          # 从 Secrets 解码写入签名密钥库文件
+#          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/Zruiry.jks
 
       # 执行 Gradle 构建 Release APK
       - name: Build with Gradle
